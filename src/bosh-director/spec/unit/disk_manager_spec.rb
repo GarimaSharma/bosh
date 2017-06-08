@@ -5,6 +5,7 @@ module Bosh::Director
     subject(:disk_manager) { DiskManager.new(logger) }
 
     let(:cloud) { Config.cloud }
+    let(:enable_cpi_resize_disk) {false}
     let(:cloud_collection) { instance_double('Bosh::Director::CloudCollection') }
     let(:cloud_factory) { instance_double(CloudFactory) }
     let(:instance_plan) { DeploymentPlan::InstancePlan.new({
@@ -56,6 +57,7 @@ module Bosh::Director
       allow(agent_client).to receive(:unmount_disk)
       allow(agent_client).to receive(:update_settings)
       allow(Config).to receive(:current_job).and_return(update_job)
+      allow(Config).to receive(:enable_cpi_resize_disk).and_return(enable_cpi_resize_disk)
       allow(CloudFactory).to receive(:new).and_return(cloud_factory)
     end
 
@@ -113,6 +115,50 @@ module Bosh::Director
       before do
         allow(cloud_factory).to receive(:for_availability_zone!).with(instance_model.availability_zone).and_return(cloud)
         allow(cloud_factory).to receive(:for_availability_zone).with(instance_model.availability_zone).and_return(cloud_collection)
+      end
+
+      context 'when `enable_cpi_disk_resize` is enabled' do
+
+        let(:enable_cpi_resize_disk) { true }
+        let(:job_persistent_disk_size) { 4096 }
+
+        context 'when only disk size has changed' do
+          it 'resizes the disk via CPI' do
+            allow(cloud).to receive(:detach_disk)
+            allow(cloud).to receive(:resize_disk)
+            allow(cloud).to receive(:attach_disk)
+
+            disk_manager.update_persistent_disk(instance_plan)
+
+            expect(cloud).to have_received(:detach_disk).with('vm234', 'disk123')
+            expect(cloud).to have_received(:resize_disk).with('disk123', 4096)
+            expect(cloud).to have_received(:attach_disk).with('vm234', 'disk123')
+          end
+        end
+
+        context 'when resize_disk is not implemented' do
+          it 'falls back to manually copying disk' do
+            allow(cloud).to receive(:resize_disk).and_raise(Bosh::Clouds::NotImplemented)
+
+            disk_manager.update_persistent_disk(instance_plan)
+
+            expect(cloud).to have_received(:resize_disk)
+            expect(cloud).to have_received(:create_disk).with(4096, {'cloud' => 'properties'}, 'vm234')
+          end
+        end
+
+        context 'when resize_disk is not supported' do
+          let(:job_persistent_disk_size) { 512 }
+
+          it 'falls back to manually copying disk' do
+            allow(cloud).to receive(:resize_disk).and_raise(Bosh::Clouds::NotSupported)
+
+            disk_manager.update_persistent_disk(instance_plan)
+
+            expect(cloud).to have_received(:resize_disk)
+            expect(cloud).to have_received(:create_disk).with(512, {'cloud' => 'properties'}, 'vm234')
+          end
+        end
       end
 
       context 'when disk creation fails' do
